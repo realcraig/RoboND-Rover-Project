@@ -4,19 +4,25 @@ import cv2
 # Identify pixels above the threshold
 # Threshold of RGB > 160 does a nice job of identifying ground pixels only
 def color_thresh(img, rgb_low=(160, 160, 160), rgb_high=(255,255,255)):
+    # Create an array of zeros same xy size as img, but single channel
+    color_select = np.zeros_like(img[:,:,0])
 
-    bgr = img[...,::-1]
-    # Convert BGR to HSV
-    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    # Require that each pixel be above all three threshold values in RGB
+    # above_thresh will now contain a boolean array with "True"
+    # where threshold was met
+    within_thresh = (img[:,:,0] >= rgb_low[0]) \
+        & (img[:,:,1] >= rgb_low[1]) \
+        & (img[:,:,2] >= rgb_low[2]) \
+        & (img[:,:,0] <= rgb_high[0]) \
+        & (img[:,:,1] <= rgb_high[1]) \
+        & (img[:,:,2] <= rgb_high[2])
 
-    # Threshold the HSV image to get only blue colors
-    bgr_low = (0, 0, 63)
-    bgr_high = (0, 0, 100)
-    mask = cv2.inRange(hsv, bgr_low, bgr_high)
+    # Index the array of zeros with the boolean array and set to 1
+    color_select[within_thresh] = 1
 
-    return mask
+    # Return the binary image
 
-
+    return color_select
 
 # Define a function to convert to rover-centric coordinates
 def rover_coords(binary_img):
@@ -24,8 +30,8 @@ def rover_coords(binary_img):
     ypos, xpos = binary_img.nonzero()
     # Calculate pixel positions with reference to the rover position being at the 
     # center bottom of the image.  
-    x_pixel = np.absolute(ypos - binary_img.shape[0]).astype(np.float)
-    y_pixel = -(xpos - binary_img.shape[0]).astype(np.float)
+    x_pixel = -(ypos - binary_img.shape[0]).astype(np.float)
+    y_pixel = -(xpos - binary_img.shape[1]/2).astype(np.float)
     return x_pixel, y_pixel
 
 
@@ -46,7 +52,7 @@ def rotate_pix(xpix, ypix, yaw):
 
     yaw_rad = yaw * np.pi / 180
     xpix_rotated = xpix * np.cos(yaw_rad) - ypix * np.sin(yaw_rad)
-    ypix_rotated = xpix * np.sin(yaw_rad) + ypix * np.sin(yaw_rad)
+    ypix_rotated = xpix * np.sin(yaw_rad) + ypix * np.cos(yaw_rad)
 
     # Return the result
     return xpix_rotated, ypix_rotated
@@ -92,27 +98,18 @@ def extract_features(img, low, high, channel, Rover):
     threshed = color_thresh(img, low, high)
 
     # 4) Update Rover.vision_image (this will be displayed on left side of screen)
-    Rover.vision_image[:, :, channel] = threshed*255
+    Rover.vision_image[:, :, channel] = threshed*255.0
 
     # 5) Convert map image pixel values to rover-centric coords
     rx, ry = rover_coords(threshed)
 
     # 6) Convert rover-centric pixel values to world coordinates
-    wx, wy = pix_to_world(rx, ry, Rover.pos[1], Rover.pos[0], Rover.yaw, Rover.worldmap.shape, scale)
+    wx, wy = pix_to_world(rx, ry, Rover.pos[0], Rover.pos[1], Rover.yaw, Rover.worldmap.shape, scale)
+
 
     # 7) Update Rover worldmap (to be displayed on right side of screen)
-    Rover.worldmap[wx, wy, channel] += 1
-    Rover.worldmap[wx, wy, (channel + 1) % 3] = 0
-    Rover.worldmap[wx, wy, (channel + 2) % 3] = 0
-
-    return rx, ry
-
-
-# Apply the above functions in succession and update the Rover state accordingly
-def perception_step(Rover):
-    # Perform perception steps to update Rover()
-    max_roll = 1
-    max_pitch = 1
+    max_roll = 1.5
+    max_pitch = 1.5
 
     if Rover.roll > 180:
         Rover.roll = 360 - Rover.roll
@@ -120,9 +117,31 @@ def perception_step(Rover):
     if Rover.pitch > 180:
         Rover.pitch = 360 - Rover.pitch
 
-    if abs(Rover.roll) > max_roll or abs(Rover.pitch) > max_pitch:
+    if abs(Rover.roll) <= max_roll and abs(Rover.pitch) <= max_pitch:
+
+        Rover.data_valid = True
+
+        if channel == 0:
+            Rover.worldmap[wy, wx, 0] += 1
+
+        if channel == 1:
+            Rover.worldmap[wy, wx, 1] += 1
+
+        if channel == 2:
+            Rover.worldmap[wy, wx, 2] += 1
+            Rover.worldmap[wy, wx, 0] *= 0.5
+            #Rover.worldmap[wy, wx, (channel + 2) % 3] = 0
+    else:
+        Rover.data_valid = False
         print ("roll/pitch threshold exceeded!", "roll", Rover.roll, "pitch", Rover.pitch)
-        return Rover
+
+    return rx, ry, wx, wy
+
+
+# Apply the above functions in succession and update the Rover state accordingly
+def perception_step(Rover):
+    # Perform perception steps to update Rover()
+
 
     # 1) Define source and destination points for perspective transform
     dst_size = 5
@@ -138,14 +157,14 @@ def perception_step(Rover):
     warped = perspect_transform(Rover.img, source, destination)
 
     # find obstacles
-    obstacle_low=(1, 1, 0)
-    obstacle_high=(159,159,159)
+    obstacle_low=(1, 0, 0)
+    obstacle_high=(160,160,160)
     extract_features(warped, obstacle_low, obstacle_high, 0, Rover)
 
     # find the navigable terrain
     nav_low=(160,160,160)
     nav_high=(255,255,255)
-    navigable_rover_x, navigable_rover_y = extract_features(warped, nav_low, nav_high, 2, Rover)
+    navigable_rover_x, navigable_rover_y, wx, wy = extract_features(warped, nav_low, nav_high, 2, Rover)
 
     # find rocks
     sample_low=(120, 100, 0)
@@ -154,6 +173,13 @@ def perception_step(Rover):
 
     # 8) Convert rover-centric pixel positions to polar coordinates
     Rover.nav_dists, Rover.nav_angles = to_polar_coords(navigable_rover_x, navigable_rover_y)
+
+    Rover.nav = np.zeros(len(Rover.nav_angles), dtype=Rover.nav_dtype)
+    Rover.nav['angle'] = Rover.nav_angles
+    Rover.nav['dist'] = Rover.nav_dists
+    Rover.nav['weight'] = Rover.worldmap[wy, wx, 2] / 255
+
+    Rover.nav = np.sort(Rover.nav, axis=-1, kind='quicksort', order='angle')
 
 
     return Rover
