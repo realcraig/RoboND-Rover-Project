@@ -108,8 +108,8 @@ def extract_features(img, low, high, channel, Rover):
 
 
     # 7) Update Rover worldmap (to be displayed on right side of screen)
-    max_roll = 1.5
-    max_pitch = 1.5
+    max_roll = 1
+    max_pitch = 1
 
     if Rover.roll > 180:
         Rover.roll = 360 - Rover.roll
@@ -129,7 +129,7 @@ def extract_features(img, low, high, channel, Rover):
 
         if channel == 2:
             Rover.worldmap[wy, wx, 2] += 1
-            Rover.worldmap[wy, wx, 0] *= 0.5
+            Rover.worldmap[wy, wx, 0] *= 0.9
             #Rover.worldmap[wy, wx, (channel + 2) % 3] = 0
     else:
         Rover.data_valid = False
